@@ -5,7 +5,7 @@ Review code changes in your browser with line-level commenting. Comments are sen
 ## Install
 
 ```bash
-pi install git:github.com/siam/pi-session-review
+pi install git:github.com/masnun-siam/pi-session-review
 ```
 
 ## Usage
