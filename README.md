@@ -16,9 +16,11 @@ No more "the thing on line 42." Just click line 42, type, done.
 
 ## What is pi?
 
-[Pi](https://pi.dev) is a terminal-based coding agent. You describe what you want, pi writes the code. It runs in your terminal, reads your files, executes commands, and iterates until the task is done.
+[Pi](https://pi.dev) is a minimal agent harness for coding. It adapts to your workflows, not the other way around. Customize it with extensions, skills, prompt templates, and themes. Supports 15+ providers (Anthropic, OpenAI, Google, and more), tree-structured session history, and four modes: interactive, print/JSON, RPC, and SDK.
 
-This extension adds a review layer on top of that workflow.
+Pi isn't a sealed product. If you need a command, tool, or workflow tweak, ask Pi to build it. It will customize itself on the fly.
+
+This extension adds a code review layer on top of that workflow.
 
 ## Install
 
