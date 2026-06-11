@@ -31,9 +31,10 @@ pi install git:github.com/masnun-siam/pi-session-review
 1. Ask pi to do something — build a feature, fix a bug, refactor a module
 2. When pi finishes, run `/changes`
 3. Browser opens with a diff view of everything pi changed
-4. Click any line, hit **COMMENT**, type your feedback
-5. Click **SEND TO PI** when done
-6. Pi receives your comments and addresses them
+4. Click a line number — a text field appears
+5. Type your feedback, hit **COMMENT** — comment is queued
+6. Repeat across files and lines as needed
+7. When done, click **SEND TO PI** — all comments delivered at once
 
 ![Comment workflow](assets/comment-workflow.jpg)
 
@@ -41,12 +42,16 @@ pi install git:github.com/masnun-siam/pi-session-review
 You:  "Add user authentication with JWT"
 pi:   *writes 15 files*
 You:  /changes
-      → browser opens
-      → click line 42 in auth.ts
-      → hit COMMENT
-      → "use bcrypt.compare instead of ==="
-      → SEND TO PI
-pi:   "Fixed. Now using bcrypt.compare on line 42."
+      → browser opens with diff view
+      → click line 42 in auth.ts → text field appears
+      → type "use bcrypt.compare instead of ==="
+      → hit COMMENT → comment queued
+      → click line 87 in routes.ts → text field appears
+      → type "add rate limiting here"
+      → hit COMMENT → comment queued
+      → repeat for other files...
+      → hit SEND TO PI
+pi:   receives all comments, addresses each one
 ```
 
 ## Features
