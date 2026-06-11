@@ -8,9 +8,9 @@ You ask pi to write code. It writes code. But reviewing what it changed means sc
 
 ## What This Does
 
-`/changes` opens a browser-based diff viewer for your current pi session. It shows every file pi touched, with a side-by-side diff. Click any line to leave a comment. When you're done, hit **Send Comments** — pi receives them as a structured follow-up message with file paths and line numbers.
+`/changes` opens a browser-based diff viewer for your current pi session. It shows every file pi touched, with a side-by-side diff. Click any line and hit **COMMENT** to leave feedback. When you're done, hit **SEND TO PI** — pi receives them as a structured follow-up message with file paths and line numbers.
 
-No more "the thing on line 42." Just click line 42 and type.
+No more "the thing on line 42." Just click line 42, type, done.
 
 ![Diff view with split/unified toggle](assets/diff-view.png)
 
@@ -31,8 +31,8 @@ pi install git:github.com/masnun-siam/pi-session-review
 1. Ask pi to do something — build a feature, fix a bug, refactor a module
 2. When pi finishes, run `/changes`
 3. Browser opens with a diff view of everything pi changed
-4. Click any line to add a comment
-5. Click **Send Comments** when done
+4. Click any line, hit **COMMENT**, type your feedback
+5. Click **SEND TO PI** when done
 6. Pi receives your comments and addresses them
 
 ![Comment workflow](assets/comment-workflow.jpg)
@@ -43,8 +43,9 @@ pi:   *writes 15 files*
 You:  /changes
       → browser opens
       → click line 42 in auth.ts
+      → hit COMMENT
       → "use bcrypt.compare instead of ==="
-      → Send Comments
+      → SEND TO PI
 pi:   "Fixed. Now using bcrypt.compare on line 42."
 ```
 
