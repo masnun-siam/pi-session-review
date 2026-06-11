@@ -12,6 +12,8 @@ You ask pi to write code. It writes code. But reviewing what it changed means sc
 
 No more "the thing on line 42." Just click line 42 and type.
 
+![Diff view with split/unified toggle](assets/diff-view.png)
+
 ## What is pi?
 
 [Pi](https://github.com/masnun-siam/pi) is a terminal-based coding agent. You describe what you want, pi writes the code. It runs in your terminal, reads your files, executes commands, and iterates until the task is done.
@@ -32,6 +34,8 @@ pi install git:github.com/masnun-siam/pi-session-review
 4. Click any line to add a comment
 5. Click **Send Comments** when done
 6. Pi receives your comments and addresses them
+
+![Comment workflow](assets/comment-workflow.jpg)
 
 ```
 You:  "Add user authentication with JWT"
