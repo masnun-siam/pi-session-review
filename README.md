@@ -16,7 +16,7 @@ No more "the thing on line 42." Just click line 42, type, done.
 
 ## What is pi?
 
-[Pi](https://github.com/masnun-siam/pi) is a terminal-based coding agent. You describe what you want, pi writes the code. It runs in your terminal, reads your files, executes commands, and iterates until the task is done.
+[Pi](https://pi.dev) is a terminal-based coding agent. You describe what you want, pi writes the code. It runs in your terminal, reads your files, executes commands, and iterates until the task is done.
 
 This extension adds a review layer on top of that workflow.
 
