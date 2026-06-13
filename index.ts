@@ -28,6 +28,19 @@ type ReviewFile = {
   preferences: { viewMode: "split" | "unified" };
 };
 
+type SettingsFile = {
+  version: number;
+  theme: string;
+  appearance: string;
+};
+
+type DiffParams = {
+  mode: "worktree" | "staged" | "branches";
+  base: string | null;
+  head: string | null;
+  dots: "2" | "3";
+};
+
 function getReviewFilePath(sessionId: string): string {
   const sessionsDir = join(process.env.HOME || "", ".pi", "agent", "sessions");
   return join(sessionsDir, `${sessionId}-review.json`);
@@ -50,6 +63,48 @@ function ensureReviewFile(sessionId: string): string {
     writeFileSync(filePath, JSON.stringify(initial, null, 2));
   }
   return filePath;
+}
+
+function getSettingsFilePath(): string {
+  return join(process.env.HOME || "", ".pi", "agent", "session-review.json");
+}
+
+const ALLOWED_THEMES = ["default", "github", "dracula", "solarized", "catppuccin"];
+const ALLOWED_APPEARANCES = ["dark", "light", "system"];
+
+function readSettings(): SettingsFile {
+  const path = getSettingsFilePath();
+  try {
+    if (existsSync(path)) {
+      return JSON.parse(readFileSync(path, "utf-8"));
+    }
+  } catch { /* corrupt — return defaults */ }
+  return { version: 1, theme: "default", appearance: "system" };
+}
+
+function writeSettings(data: SettingsFile): void {
+  writeFileSync(getSettingsFilePath(), JSON.stringify(data, null, 2));
+}
+
+function isSafeRef(name: string): boolean {
+  return /^[A-Za-z0-9._/+-]+$/.test(name) && !name.startsWith("-");
+}
+
+function parseDiffParams(url: URL): { params: DiffParams } | { error: string } {
+  const rawMode = url.searchParams.get("mode") || "worktree";
+  if (!["worktree", "staged", "branches"].includes(rawMode)) {
+    return { error: `Invalid mode: ${rawMode}` };
+  }
+  const mode = rawMode as DiffParams["mode"];
+  const base = url.searchParams.get("base");
+  const head = url.searchParams.get("head");
+  const dots = (url.searchParams.get("dots") === "2" ? "2" : "3") as "2" | "3";
+  if (mode === "branches") {
+    if (!base || !head) return { error: "base and head required for branches mode" };
+    if (!isSafeRef(base)) return { error: `Invalid base ref: ${base}` };
+    if (!isSafeRef(head)) return { error: `Invalid head ref: ${head}` };
+  }
+  return { params: { mode, base, head, dots } };
 }
 
 function openBrowser(url: string) {
@@ -96,14 +151,25 @@ function parseDiff(diffOutput: string) {
   return result;
 }
 
-function listChangedFiles(cwd: string) {
-  // Tracked: modified/deleted vs HEAD + already-staged adds vs HEAD
+function listChangedFiles(cwd: string, params: DiffParams = { mode: "worktree", base: null, head: null, dots: "3" }) {
+  // Derive the diff target from params
+  let target: string;
+  if (params.mode === "staged") {
+    target = "--cached";
+  } else if (params.mode === "branches") {
+    const rangeSep = params.dots === "2" ? ".." : "...";
+    target = `${params.base}${rangeSep}${params.head}`;
+  } else {
+    target = "HEAD";
+  }
+
   // numstat output: "added\tdeleted\tpath"
   let numstat = "";
   try {
-    numstat = execSync("git diff --numstat HEAD", {
+    numstat = execSync(`git diff --numstat ${target}`, {
       cwd,
       encoding: "utf-8",
+      stdio: "pipe",
       maxBuffer: 4 * 1024 * 1024,
     });
   } catch {
@@ -113,9 +179,10 @@ function listChangedFiles(cwd: string) {
   // Status (A/M/D etc.) for tracked changes
   let statusOut = "";
   try {
-    statusOut = execSync("git diff --name-status HEAD", {
+    statusOut = execSync(`git diff --name-status ${target}`, {
       cwd,
       encoding: "utf-8",
+      stdio: "pipe",
       maxBuffer: 4 * 1024 * 1024,
     });
   } catch {
@@ -144,43 +211,59 @@ function listChangedFiles(cwd: string) {
     });
   }
 
-  // Untracked (new) files
-  let untracked = "";
-  try {
-    untracked = execSync("git ls-files --others --exclude-standard", {
-      cwd,
-      encoding: "utf-8",
-      maxBuffer: 4 * 1024 * 1024,
-    });
-  } catch {
-    /* ignore */
-  }
-
-  for (const path of untracked.split("\n").map((s) => s.trim()).filter(Boolean)) {
-    if (files.has(path)) continue;
-    let added = 0;
+  // Untracked (new) files — worktree mode only
+  // NOTE: the watcher ignores .git/, so `git add` from a terminal won't trigger
+  // staged-mode SSE refresh; file-saves still do. Acceptable for v1.
+  if (params.mode === "worktree") {
+    let untracked = "";
     try {
-      const abs = join(cwd, path);
-      const content = readFileSync(abs, "utf-8");
-      added = content.length === 0 ? 0 : content.split("\n").length;
-      // trailing newline shouldn't count as an extra line
-      if (content.endsWith("\n")) added = Math.max(0, added - 1);
+      untracked = execSync("git ls-files --others --exclude-standard", {
+        cwd,
+        encoding: "utf-8",
+        stdio: "pipe",
+        maxBuffer: 4 * 1024 * 1024,
+      });
     } catch {
-      /* binary or unreadable */
+      /* ignore */
     }
-    files.set(path, { path, status: "A", added, removed: 0 });
+
+    for (const path of untracked.split("\n").map((s) => s.trim()).filter(Boolean)) {
+      if (files.has(path)) continue;
+      let added = 0;
+      try {
+        const abs = join(cwd, path);
+        const content = readFileSync(abs, "utf-8");
+        added = content.length === 0 ? 0 : content.split("\n").length;
+        // trailing newline shouldn't count as an extra line
+        if (content.endsWith("\n")) added = Math.max(0, added - 1);
+      } catch {
+        /* binary or unreadable */
+      }
+      files.set(path, { path, status: "A", added, removed: 0 });
+    }
   }
 
   return [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
-function getDiffForFile(cwd: string, file: string) {
-  // First try HEAD diff (covers tracked changes)
+function getDiffForFile(cwd: string, file: string, params: DiffParams = { mode: "worktree", base: null, head: null, dots: "3" }) {
+  // Derive the diff target from params
+  let target: string;
+  if (params.mode === "staged") {
+    target = "--cached";
+  } else if (params.mode === "branches") {
+    const rangeSep = params.dots === "2" ? ".." : "...";
+    target = `${params.base}${rangeSep}${params.head}`;
+  } else {
+    target = "HEAD";
+  }
+
   let out = "";
   try {
-    out = execSync(`git diff HEAD -- "${file}"`, {
+    out = execSync(`git diff ${target} -- "${file}"`, {
       cwd,
       encoding: "utf-8",
+      stdio: "pipe",
       maxBuffer: 8 * 1024 * 1024,
     });
   } catch {
@@ -189,15 +272,19 @@ function getDiffForFile(cwd: string, file: string) {
   if (out.trim()) return parseDiff(out);
 
   // Untracked / new file: synthesize a full-add diff via --no-index against /dev/null
-  try {
-    out = execSync(`git diff --no-index --no-color -- /dev/null "${file}"`, {
-      cwd,
-      encoding: "utf-8",
-      maxBuffer: 8 * 1024 * 1024,
-    });
-  } catch (err: any) {
-    // git diff --no-index exits 1 when files differ — that's expected
-    out = err?.stdout || "";
+  // Only applicable in worktree mode — staged/branches can't produce untracked files
+  if (params.mode === "worktree") {
+    try {
+      out = execSync(`git diff --no-index --no-color -- /dev/null "${file}"`, {
+        cwd,
+        encoding: "utf-8",
+        stdio: "pipe",
+        maxBuffer: 8 * 1024 * 1024,
+      });
+    } catch (err: any) {
+      // git diff --no-index exits 1 when files differ — that's expected
+      out = err?.stdout || "";
+    }
   }
   return parseDiff(out);
 }
@@ -290,26 +377,9 @@ export default function activate(pi: ExtensionAPI): void {
         }
 
         const uiDir = join(__dirname, "ui");
-        const fontsDir = join(__dirname, "fonts");
         const indexHtml = readFileSync(join(uiDir, "index.html"), "utf-8");
         const appJs = readFileSync(join(uiDir, "app.js"), "utf-8");
         const stylesCss = readFileSync(join(uiDir, "styles.css"), "utf-8");
-
-        const fontFiles = new Map<string, Buffer>();
-        const fontMimes: Record<string, string> = {
-          ".ttf": "font/ttf",
-          ".woff": "font/woff",
-          ".woff2": "font/woff2",
-        };
-        try {
-          const { readdirSync } = require("fs");
-          for (const f of readdirSync(fontsDir)) {
-            const ext = f.slice(f.lastIndexOf("."));
-            if (fontMimes[ext]) {
-              fontFiles.set("/fonts/" + f, readFileSync(join(fontsDir, f)));
-            }
-          }
-        } catch { /* no fonts dir */ }
 
         server = createServer((req, res) => {
           try {
@@ -341,16 +411,6 @@ export default function activate(pi: ExtensionAPI): void {
               return;
             }
 
-            if (url.pathname.startsWith("/fonts/")) {
-              const fontBuf = fontFiles.get(url.pathname);
-              if (fontBuf) {
-                const ext = url.pathname.slice(url.pathname.lastIndexOf("."));
-                res.writeHead(200, { "Content-Type": fontMimes[ext] || "application/octet-stream" });
-                res.end(fontBuf);
-                return;
-              }
-            }
-
             if (url.pathname === "/api/session") {
               corsHeaders(res);
               res.writeHead(200, { "Content-Type": "application/json" });
@@ -373,8 +433,14 @@ export default function activate(pi: ExtensionAPI): void {
 
             if (url.pathname === "/api/files") {
               corsHeaders(res);
+              const parsedFiles = parseDiffParams(url);
+              if ("error" in parsedFiles) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: parsedFiles.error }));
+                return;
+              }
               try {
-                const files = listChangedFiles(cwd);
+                const files = listChangedFiles(cwd, parsedFiles.params);
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ files }));
               } catch (err) {
@@ -397,8 +463,14 @@ export default function activate(pi: ExtensionAPI): void {
                 res.end(JSON.stringify({ error: "file parameter required" }));
                 return;
               }
+              const parsedDiff = parseDiffParams(url);
+              if ("error" in parsedDiff) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: parsedDiff.error }));
+                return;
+              }
               try {
-                const lines = getDiffForFile(cwd, file);
+                const lines = getDiffForFile(cwd, file, parsedDiff.params);
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ lines }));
               } catch (err) {
@@ -479,6 +551,70 @@ export default function activate(pi: ExtensionAPI): void {
                   })
                 );
               }
+              return;
+            }
+
+            if (url.pathname === "/api/branches") {
+              corsHeaders(res);
+              try {
+                // git branch output: "  name\n* current\n  other"
+                const branchOut = execSync("git branch", { cwd, encoding: "utf-8", stdio: "pipe" });
+                let current: string | null = null;
+                const branches = branchOut
+                  .split("\n")
+                  .map((s) => s.trim())
+                  .filter(Boolean)
+                  .map((s) => {
+                    if (s.startsWith("* ")) {
+                      current = s.slice(2).trim();
+                      return current;
+                    }
+                    return s;
+                  });
+                const detached = current !== null && current.startsWith("(");
+                if (detached) current = null;
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ branches, current, detached }));
+              } catch {
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ branches: [], current: null, detached: false }));
+              }
+              return;
+            }
+
+            if (url.pathname === "/api/settings" && req.method === "GET") {
+              corsHeaders(res);
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(readSettings()));
+              return;
+            }
+
+            if (url.pathname === "/api/settings" && req.method === "POST") {
+              let body = "";
+              req.on("error", () => {
+                if (!res.headersSent) res.writeHead(500);
+                res.end(JSON.stringify({ error: "Request stream error" }));
+              });
+              req.on("data", (chunk) => (body += chunk));
+              req.on("end", () => {
+                try {
+                  const incoming = JSON.parse(body);
+                  const current = readSettings();
+                  if (incoming.theme !== undefined && ALLOWED_THEMES.includes(incoming.theme)) {
+                    current.theme = incoming.theme;
+                  }
+                  if (incoming.appearance !== undefined && ALLOWED_APPEARANCES.includes(incoming.appearance)) {
+                    current.appearance = incoming.appearance;
+                  }
+                  writeSettings(current);
+                  corsHeaders(res);
+                  res.writeHead(200, { "Content-Type": "application/json" });
+                  res.end(JSON.stringify({ success: true }));
+                } catch (err) {
+                  if (!res.headersSent) res.writeHead(500);
+                  res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to save settings" }));
+                }
+              });
               return;
             }
 

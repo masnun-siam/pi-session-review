@@ -1,8 +1,131 @@
 import { h, render } from "https://esm.sh/preact@10.19.3";
 import { useState, useEffect, useRef, useCallback, useMemo } from "https://esm.sh/preact@10.19.3/hooks";
 import htm from "https://esm.sh/htm@3.1.1";
+import hljs from "https://esm.sh/highlight.js@11/lib/common";
 
 const html = htm.bind(h);
+
+// ── theming ────────────────────────────────────────────────
+const THEMES = {
+  default:    { label: "Default",    variants: ["dark", "light"] },
+  github:     { label: "GitHub",     variants: ["light", "dark"] },
+  dracula:    { label: "Dracula",    variants: ["dark"] },
+  solarized:  { label: "Solarized",  variants: ["light", "dark"] },
+  catppuccin: { label: "Catppuccin", variants: ["light", "dark"] },
+};
+
+const mq = typeof window !== "undefined" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+
+function resolveAppearance(theme, appearance) {
+  const want = appearance === "system"
+    ? (mq && mq.matches ? "dark" : "light")
+    : appearance;
+  const variants = THEMES[theme]?.variants || ["dark"];
+  return variants.includes(want) ? want : variants[0];
+}
+
+function applyTheme(theme, appearance) {
+  const resolved = resolveAppearance(theme, appearance);
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.appearance = resolved;
+}
+
+// ── syntax highlighting ───────────────────────────────────
+const EXT_LANG = {
+  js: "javascript", mjs: "javascript", cjs: "javascript",
+  ts: "typescript", tsx: "typescript", jsx: "javascript",
+  py: "python", rb: "ruby", go: "go", rs: "rust",
+  java: "java", kt: "kotlin", swift: "swift",
+  c: "c", h: "c", cpp: "cpp", cc: "cpp", cs: "csharp",
+  css: "css", scss: "scss", less: "less",
+  html: "xml", htm: "xml", xml: "xml", svg: "xml",
+  json: "json", jsonc: "json", yaml: "yaml", yml: "yaml",
+  toml: "ini", ini: "ini", env: "ini",
+  sh: "bash", bash: "bash", zsh: "bash",
+  php: "php", sql: "sql", graphql: "graphql",
+  md: "markdown", mdx: "markdown",
+};
+
+function langFromFile(filepath) {
+  if (!filepath) return null;
+  const base = filepath.split("/").pop().toLowerCase();
+  if (base === "dockerfile") return "dockerfile";
+  const ext = base.split(".").pop();
+  return EXT_LANG[ext] || null;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function safeHighlight(code, lang) {
+  if (!code) return "";
+  try {
+    if (lang && hljs.getLanguage(lang)) {
+      return hljs.highlight(code, { language: lang }).value;
+    }
+  } catch { /* ignore */ }
+  return escapeHtml(code);
+}
+
+// ── searchable branch select ───────────────────────────────
+function BranchSelect({ value, options, onChange, title }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const wrapRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) { setQuery(""); return; }
+    requestAnimationFrame(() => inputRef.current?.focus());
+    function onDown(e) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const filtered = options.filter(
+    (b) => !query || b.toLowerCase().includes(query.toLowerCase()),
+  );
+
+  return html`
+    <div class="bs-wrap" ref=${wrapRef} title=${title}>
+      <button
+        class=${`bs-trigger ${open ? "open" : ""}`}
+        onClick=${() => setOpen((o) => !o)}
+        type="button"
+      >
+        <span class="bs-val">${value || "—"}</span>
+        <span class="bs-caret">${open ? "▴" : "▾"}</span>
+      </button>
+      ${open && html`
+        <div class="bs-popup">
+          <input
+            ref=${inputRef}
+            class="bs-search"
+            type="text"
+            placeholder="Filter branches…"
+            value=${query}
+            onInput=${(e) => setQuery(e.target.value)}
+          />
+          <ul class="bs-list">
+            ${filtered.length === 0
+              ? html`<li class="bs-empty">No matches</li>`
+              : filtered.map((b) => html`
+                  <li
+                    key=${b}
+                    class=${`bs-item ${b === value ? "active" : ""}`}
+                    onMouseDown=${() => { onChange(b); setOpen(false); }}
+                  >${b}</li>
+                `)
+            }
+          </ul>
+        </div>
+      `}
+    </div>
+  `;
+}
 
 function App() {
   const [files, setFiles] = useState([]); // [{path, status, added, removed}]
@@ -20,37 +143,78 @@ function App() {
   const [editText, setEditText] = useState("");
   const [toast, setToast] = useState(null);
 
+  // diff source state (not persisted — resets to worktree on each load)
+  const [diffSource, setDiffSource] = useState({ mode: "worktree", base: null, head: null, dots: "3" });
+  const [branches, setBranches] = useState({ branches: [], current: null, detached: false });
+  const [branchesLoaded, setBranchesLoaded] = useState(false);
+
+  // theme/appearance state (persisted in ~/.pi/agent/session-review.json)
+  const [settings, setSettings] = useState({ theme: "default", appearance: "system" });
+  const [themePopOpen, setThemePopOpen] = useState(false);
+  const themePopRef = useRef(null);
+
   const filesRef = useRef(files);
   const selectedFileRef = useRef(selectedFile);
   const diffRef = useRef(diff);
   const focusedLineRef = useRef(focusedLine);
   const reviewRef = useRef(review);
   const commentingRef = useRef(commentingLine);
+  const diffSourceRef = useRef(diffSource);
   useEffect(() => { filesRef.current = files; }, [files]);
   useEffect(() => { selectedFileRef.current = selectedFile; }, [selectedFile]);
   useEffect(() => { diffRef.current = diff; }, [diff]);
   useEffect(() => { focusedLineRef.current = focusedLine; }, [focusedLine]);
   useEffect(() => { reviewRef.current = review; }, [review]);
   useEffect(() => { commentingRef.current = commentingLine; }, [commentingLine]);
+  useEffect(() => { diffSourceRef.current = diffSource; }, [diffSource]);
+
+  // click-outside to dismiss theme popover
+  useEffect(() => {
+    if (!themePopOpen) return;
+    function onDown(e) {
+      if (themePopRef.current && !themePopRef.current.contains(e.target)) {
+        setThemePopOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [themePopOpen]);
 
   // ── initial load ───────────────────────────────────────
   useEffect(() => {
     (async () => {
-      await Promise.all([loadReview(), loadFiles()]);
+      const [, , savedSettings] = await Promise.all([loadReview(), loadFiles(), loadSettings()]);
       setLoading(false);
+      // apply theme immediately after settings load
+      if (savedSettings) {
+        applyTheme(savedSettings.theme, savedSettings.appearance);
+      }
     })();
 
-    // SSE: live refresh on filesystem changes
+    // System appearance listener — re-applies theme when OS switches dark/light
+    const onMqChange = () => {
+      setSettings((s) => {
+        applyTheme(s.theme, s.appearance);
+        return s;
+      });
+    };
+    mq && mq.addEventListener("change", onMqChange);
+
+    // SSE: live refresh on filesystem changes (skip in branches mode — static comparison)
     let es;
     try {
       es = new EventSource("/api/events");
       es.addEventListener("files-changed", () => {
+        if (diffSourceRef.current.mode === "branches") return;
         loadFiles();
         if (selectedFileRef.current) loadDiff(selectedFileRef.current);
       });
       es.onerror = () => { /* let browser auto-retry */ };
     } catch {}
-    return () => { try { es && es.close(); } catch {} };
+    return () => {
+      mq && mq.removeEventListener("change", onMqChange);
+      try { es && es.close(); } catch {}
+    };
   }, []);
 
   // ── data fetchers ──────────────────────────────────────
@@ -66,9 +230,32 @@ function App() {
     } catch (err) { console.error("review load:", err); }
   }
 
-  async function loadFiles() {
+  async function loadSettings() {
     try {
-      const res = await fetch("/api/files");
+      const res = await fetch("/api/settings");
+      const data = await res.json();
+      setSettings(data);
+      applyTheme(data.theme, data.appearance);
+      return data;
+    } catch (err) { console.error("settings load:", err); }
+  }
+
+  function buildDiffQuery(src) {
+    const p = new URLSearchParams({ mode: src.mode });
+    if (src.mode === "branches") {
+      if (src.base) p.set("base", src.base);
+      if (src.head) p.set("head", src.head);
+      if (src.dots) p.set("dots", src.dots);
+    }
+    return p.toString();
+  }
+
+  async function loadFiles(src) {
+    const source = src || diffSourceRef.current;
+    // Don't fetch branch diff until both sides are selected
+    if (source.mode === "branches" && (!source.base || !source.head)) return;
+    try {
+      const res = await fetch(`/api/files?${buildDiffQuery(source)}`);
       const data = await res.json();
       const list = data.files || [];
       setFiles(list);
@@ -83,9 +270,10 @@ function App() {
     } catch (err) { console.error("files load:", err); }
   }
 
-  async function loadDiff(file) {
+  async function loadDiff(file, src) {
+    const source = src || diffSourceRef.current;
     try {
-      const res = await fetch(`/api/diff?file=${encodeURIComponent(file)}`);
+      const res = await fetch(`/api/diff?file=${encodeURIComponent(file)}&${buildDiffQuery(source)}`);
       const data = await res.json();
       setDiff(data.lines || []);
       setFocusedLine(0);
@@ -93,6 +281,51 @@ function App() {
   }
 
   useEffect(() => { if (selectedFile) loadDiff(selectedFile); }, [selectedFile]);
+
+  // Reload file list when diff source changes
+  useEffect(() => { loadFiles(diffSource); }, [diffSource]);
+
+  async function switchToBranches() {
+    // If already loaded, just switch mode using existing branches state
+    if (branchesLoaded) {
+      const list = branches.branches;
+      const preferred = ["main", "master"];
+      const base = preferred.find((b) => list.includes(b)) || list[0] || null;
+      const head = branches.current || list[0] || null;
+      setDiffSource({ mode: "branches", base, head, dots: "3" });
+      return;
+    }
+    // Fetch branches first, then apply all state updates synchronously so Preact
+    // batches them into a single render — avoids dropdown rendering before options are available
+    try {
+      const res = await fetch("/api/branches");
+      const data = await res.json();
+      const list = data.branches || [];
+      const preferred = ["main", "master"];
+      const base = preferred.find((b) => list.includes(b)) || list[0] || null;
+      const head = data.current || list[0] || null;
+      // All three updates happen synchronously in the same microtask continuation
+      setBranches(data);
+      setBranchesLoaded(true);
+      setDiffSource({ mode: "branches", base, head, dots: "3" });
+    } catch (err) {
+      console.error("branches load:", err);
+      setDiffSource({ mode: "branches", base: null, head: null, dots: "3" });
+    }
+  }
+
+  async function saveSettings(patch) {
+    const next = { ...settings, ...patch };
+    setSettings(next);
+    applyTheme(next.theme, next.appearance);
+    try {
+      await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+    } catch (err) { console.error("settings save:", err); }
+  }
 
   // ── persistence helpers ────────────────────────────────
   async function persistReview(next) {
@@ -270,7 +503,13 @@ function App() {
           <span class="count">${files.length}</span>
         </div>
         ${files.length === 0
-          ? html`<div class="sidebar-empty">No changes detected in this working tree.</div>`
+          ? html`<div class="sidebar-empty">${
+              diffSource.mode === "staged" ? "Nothing staged." :
+              diffSource.mode === "branches" && (!diffSource.base || !diffSource.head) ? "Select branches above." :
+              diffSource.mode === "branches" && branches.branches.length === 0 ? "No local branches." :
+              diffSource.mode === "branches" ? "No differences between these refs." :
+              "No changes detected in this working tree."
+            }</div>`
           : html`
               <ul class="file-list">
                 ${files.map((f) => {
@@ -303,6 +542,43 @@ function App() {
         <div class="toolbar">
           <div class="segmented" role="tablist">
             <button
+              class=${diffSource.mode === "worktree" ? "active" : ""}
+              onClick=${() => setDiffSource({ mode: "worktree", base: null, head: null, dots: "3" })}
+            >Worktree</button>
+            <button
+              class=${diffSource.mode === "staged" ? "active" : ""}
+              onClick=${() => setDiffSource({ mode: "staged", base: null, head: null, dots: "3" })}
+            >Staged</button>
+            <button
+              class=${diffSource.mode === "branches" ? "active" : ""}
+              onClick=${switchToBranches}
+            >Branches</button>
+          </div>
+
+          ${diffSource.mode === "branches" && html`
+            <div class="branch-controls">
+              <${BranchSelect}
+                value=${diffSource.base}
+                options=${branches.branches}
+                onChange=${(v) => setDiffSource((s) => ({ ...s, base: v }))}
+                title="Base branch"
+              />
+              <button
+                class="dots-toggle"
+                onClick=${() => setDiffSource((s) => ({ ...s, dots: s.dots === "3" ? "2" : "3" }))}
+                title=${diffSource.dots === "3" ? "Three-dot (PR-style): changes on head since merge-base" : "Two-dot (exact): raw diff between tips"}
+              >${diffSource.dots === "3" ? "···" : "··"}</button>
+              <${BranchSelect}
+                value=${diffSource.head}
+                options=${branches.branches}
+                onChange=${(v) => setDiffSource((s) => ({ ...s, head: v }))}
+                title="Head branch"
+              />
+            </div>
+          `}
+
+          <div class="segmented" role="tablist">
+            <button
               class=${review.preferences.viewMode === "split" ? "active" : ""}
               onClick=${() => setViewMode("split")}
             >Split</button>
@@ -324,6 +600,42 @@ function App() {
           >
             <span class="send-arrow">↗</span> Send to pi
           </button>
+
+          <div class="theme-btn-wrap" ref=${themePopRef}>
+            <button
+              class=${`theme-btn ${themePopOpen ? "open" : ""}`}
+              onClick=${() => setThemePopOpen((o) => !o)}
+              title="Theme"
+            >Aa</button>
+            ${themePopOpen && html`
+              <div class="theme-pop">
+                <div>
+                  <div class="theme-pop-label">Theme</div>
+                  <select
+                    class="theme-pop-select"
+                    value=${settings.theme}
+                    onChange=${(e) => saveSettings({ theme: e.target.value })}
+                  >
+                    ${Object.entries(THEMES).map(([key, t]) => html`
+                      <option key=${key} value=${key}>${t.label}${t.variants.length === 1 ? " (dark only)" : ""}</option>
+                    `)}
+                  </select>
+                </div>
+                <div>
+                  <div class="theme-pop-label">Appearance</div>
+                  <div class="segmented" role="tablist">
+                    ${["light", "dark", "system"].map((a) => html`
+                      <button
+                        key=${a}
+                        class=${settings.appearance === a ? "active" : ""}
+                        onClick=${() => saveSettings({ appearance: a })}
+                      >${a.charAt(0).toUpperCase() + a.slice(1)}</button>
+                    `)}
+                  </div>
+                </div>
+              </div>
+            `}
+          </div>
         </div>
 
         <div class="diff-container">
@@ -369,16 +681,18 @@ function statusClass(s) {
 
 function DiffView(props) {
   const { file, diff, viewMode } = props;
+  const lang = useMemo(() => langFromFile(file), [file]);
 
   return html`
     <div class="diff-file">
       <div class="diff-file-header">
         <span class="marker">§</span>
         <span class="path">${file}</span>
+        ${lang && html`<span class="diff-file-lang">${lang}</span>`}
       </div>
       ${viewMode === "split"
-        ? html`<${SplitDiff} ...${props} />`
-        : html`<${UnifiedDiff} ...${props} />`}
+        ? html`<${SplitDiff} ...${props} lang=${lang} />`
+        : html`<${UnifiedDiff} ...${props} lang=${lang} />`}
     </div>
   `;
 }
@@ -386,11 +700,16 @@ function DiffView(props) {
 // ───────────────── Unified view ─────────────────
 
 function UnifiedDiff({
-  file, diff, focusedLine, setFocusedLine,
+  file, diff, lang, focusedLine, setFocusedLine,
   onComment, onUpdateComment, onDeleteComment, getComments,
   commentingLine, setCommentingLine, commentText, setCommentText,
   editingId, setEditingId, editText, setEditText,
 }) {
+  const highlighted = useMemo(
+    () => diff.map((line) => safeHighlight(line.content, lang)),
+    [diff, lang],
+  );
+
   return html`
     <table class="diff-table unified">
       <colgroup>
@@ -425,8 +744,7 @@ function UnifiedDiff({
                 class="diff-line-num"
                 onClick=${(e) => { e.stopPropagation(); setFocusedLine(i); setCommentingLine(isCommenting ? null : key); }}
               >${line.newNum || ""}</td>
-              <td class="diff-line-content">${line.content}</td>
-            </tr>
+              <td class="diff-line-content" dangerouslySetInnerHTML=${{ __html: highlighted[i] }} /></tr>
             ${isCommenting &&
               html`<${CommentEditor}
                 colspan=${3}
@@ -502,12 +820,18 @@ function buildSplitRows(lines) {
 }
 
 function SplitDiff({
-  file, diff, focusedLine, setFocusedLine,
+  file, diff, lang, focusedLine, setFocusedLine,
   onComment, onUpdateComment, onDeleteComment, getComments,
   commentingLine, setCommentingLine, commentText, setCommentText,
   editingId, setEditingId, editText, setEditText,
 }) {
   const rows = useMemo(() => buildSplitRows(diff), [diff]);
+  // Build a content→html map once per diff+lang; keyed by line index
+  const hlMap = useMemo(() => {
+    const m = new Map();
+    diff.forEach((line, i) => { m.set(i, safeHighlight(line.content, lang)); });
+    return m;
+  }, [diff, lang]);
 
   return html`
     <table class="diff-table split">
@@ -554,7 +878,7 @@ function SplitDiff({
                   setCommentingLine(isCommentingLeft ? null : leftKey);
                 }}
               >${row.left?.oldNum || ""}</td>
-              <td class=${`diff-line-content diff-side ${leftType}`}>${row.left ? row.left.content : ""}</td>
+              <td class=${`diff-line-content diff-side ${leftType}`} dangerouslySetInnerHTML=${{ __html: row.left ? (hlMap.get(row.leftIdx) || "") : "" }} />
               <td class="side-divider"></td>
               <td
                 class=${`diff-line-num diff-side ${rightType}`}
@@ -565,7 +889,7 @@ function SplitDiff({
                   setCommentingLine(isCommentingRight ? null : rightKey);
                 }}
               >${row.right?.newNum || ""}</td>
-              <td class=${`diff-line-content diff-side ${rightType}`}>${row.right ? row.right.content : ""}</td>
+              <td class=${`diff-line-content diff-side ${rightType}`} dangerouslySetInnerHTML=${{ __html: row.right ? (hlMap.get(row.rightIdx) || "") : "" }} />
             </tr>
             ${(isCommentingLeft || isCommentingRight) &&
               html`<${CommentEditor}
